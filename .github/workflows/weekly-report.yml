@@ -1,0 +1,29 @@
+name: Weekly Project Report
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'  # Every Monday at 9 AM
+  workflow_dispatch:
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+      
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.9'
+        
+    - name: Install dependencies
+      run: pip install PyGithub python-dotenv
+      
+    - name: Generate report
+      env:
+        GH_TOKEN: ${{ secrets.GH_PROJECTS_TOKEN }}
+      run: |
+        python .github/workflows/generate_report.py > report.md
+        cat report.md
+        cat .github/workflows/GITHUB_OUTPUT
