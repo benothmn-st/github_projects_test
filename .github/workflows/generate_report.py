@@ -1,47 +1,62 @@
-from github import Github
-from datetime import datetime, timedelta
 import os
 import sys
+import requests
+from datetime import datetime, timedelta
 
 # Initialize GitHub client
 ACCESS_TOKEN = os.getenv('GH_TOKEN')
-REPO_NAME = "benothmn-st/github_projects_test"
+REPO_OWNER = "benothmn-st"
+REPO_NAME = "github_projects_test"
 PROJECT_NUMBER = 1  # Your project number
 
 if not ACCESS_TOKEN:
     print("Error: GH_TOKEN environment variable not set.", file=sys.stderr)
     sys.exit(1)
 
-g = Github(ACCESS_TOKEN)
-
-# Fetch the repository
-try:
-    repo = g.get_repo(REPO_NAME)
-except Exception as e:
-    print(f"Error: {e}", file=sys.stderr)
-    sys.exit(1)
-#repo_names = [repo.name for repo in g.get_repos()]
-
-#with open('GITHUB_OUTPUT', 'w') as file:
-    #file.write(', '.join(repo_names))
-#exit()
-
-# Find the project
-project = None
-for proj in repo.get_projects():
-    if proj.number == PROJECT_NUMBER:
-        project = proj
-        break
-
-if not project:
-    raise Exception("Project not found")
-
 # Calculate date range
 end_date = datetime.now()
 start_date = end_date - timedelta(days=7)
 
-# Get all project columns (statuses)
-columns = project.get_columns()
+# GraphQL query to fetch project details
+query = f"""
+{{
+  repository(owner: "{REPO_OWNER}", name: "{REPO_NAME}") {{
+    projectsV2(first: 10) {{
+      nodes {{
+        number
+        title
+        items(first: 100) {{
+          nodes {{
+            content {{
+              ... on Issue {{
+                title
+                createdAt
+                closedAt
+              }}
+            }}
+          }}
+        }}
+      }}
+    }}
+  }}
+}}
+"""
+
+headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
+response = requests.post('https://api.github.com/graphql', json={'query': query}, headers=headers)
+
+if response.status_code != 200:
+    raise Exception(f"Query failed to run by returning code of {response.status_code}. {response.text}")
+
+# Parse the response
+data = response.json()
+projects = data['data']['repository']['projectsV2']['nodes']
+
+# Find the project
+project = next((proj for proj in projects if proj['number'] == PROJECT_NUMBER), None)
+
+if not project:
+    raise Exception("Project not found")
 
 # Initialize metrics
 metrics = {
@@ -51,35 +66,30 @@ metrics = {
     'cycle_times': []
 }
 
-# Get all issues in the project
-for column in columns:
-    column_name = column.name
-    metrics['status_counts'][column_name] = []
-    
-    for card in column.get_cards():
-        issue = card.get_content()
-        
-        if not issue or not hasattr(issue, 'title'):  # Skip notes
-            continue
-            
-        # Issues in this status
-        metrics['status_counts'][column_name].append(issue.title)
-        
+# Process project items
+for item in project['items']['nodes']:
+    content = item['content']
+    if content:
+        title = content['title']
+        created_at = datetime.fromisoformat(content['createdAt'].replace('Z', '+00:00')).replace(tzinfo=None)
+        closed_at = content.get('closedAt')
+        closed_at = datetime.fromisoformat(closed_at.replace('Z', '+00:00')).replace(tzinfo=None) if closed_at else None
+
         # Check if closed in last week
-        if issue.closed_at and start_date <= issue.closed_at <= end_date:
+        if closed_at and start_date <= closed_at <= end_date:
             metrics['closed_issues'].append({
-                'title': issue.title,
-                'closed_at': issue.closed_at,
-                'created_at': issue.created_at,
-                'cycle_time': (issue.closed_at - issue.created_at).days
+                'title': title,
+                'closed_at': closed_at,
+                'created_at': created_at,
+                'cycle_time': (closed_at - created_at).days
             })
-        
+
         # Check if created in last week
-        if start_date <= issue.created_at <= end_date:
-            metrics['opened_issues'].append(issue.title)
+        if start_date <= created_at <= end_date:
+            metrics['opened_issues'].append(title)
 
 # Calculate additional metrics
-metrics['total_open'] = sum(len(issues) for status, issues in metrics['status_counts'].items() if status.lower() != 'done')
+metrics['total_open'] = len(metrics['opened_issues'])  # Assuming all opened issues are still open
 metrics['net_change'] = len(metrics['opened_issues']) - len(metrics['closed_issues'])
 metrics['avg_cycle_time'] = sum(issue['cycle_time'] for issue in metrics['closed_issues']) / len(metrics['closed_issues']) if metrics['closed_issues'] else 0
 
@@ -93,13 +103,9 @@ report = f"""
 - Net change in open issues: {metrics['net_change']}
 - Total open issues: {metrics['total_open']}
 
-## Work Status Breakdown
+## Recently Closed Issues
 """
 
-for status, issues in metrics['status_counts'].items():
-    report += f"- {status}: {len(issues)} issues\n"
-
-report += "\n## Recently Closed Issues\n"
 for issue in metrics['closed_issues']:
     report += f"- {issue['title']} (Cycle time: {issue['cycle_time']} days)\n"
 
